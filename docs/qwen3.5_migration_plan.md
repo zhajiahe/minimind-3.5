@@ -183,7 +183,19 @@
 
 ## 9. 后续工作
 
-按优先级排列，前三项是发布新权重前的必需项。
+### 9.0 已完成项（2026-09-04 第二轮，CPU 环境）
+
+| 项 | 结果 |
+|---|---|
+| llama.cpp 链路 | `convert_hf_to_gguf.py --no-mtp` 转换成功，GGUF 架构 `qwen35`，元数据（旋转维度 24、`mrope_section`、`full_attention_interval`、SSM state）正确；`llama-simple` f16 贪心 12 token 与原生 / HF fp32 / HF fp16 **完全一致**；Q8_0 量化可推理。README 已补 `--no-mtp` 与新版 `conversion/base.py` 位置 |
+| RL 脚本 smoke（GRPO / PPO / Agent） | 新增 `--reward_model_path none` 只用规则奖励，三条链路在 CPU 上跑通；顺带发现并修复 `max_seq_len` 误覆盖 `max_position_embeddings` 导致多轮 rollout 越界的回归 |
+| `train_distillation.py` smoke | MoE 教师 → Dense 学生跑通 |
+| `init_model` 忽略 `--save_dir` | 已修复，所有训练脚本传入 `save_dir=args.save_dir` |
+| `transformers<5` 兼容分支 | `convert_model.py` 已清理；模型代码本身在 4.57 上也能训练/推理，只有导出需要 `>=5.2` |
+| 仓库内回归测试 | 新增 `tests/test_model.py`（8 项，CPU 约 20s，`python tests/test_model.py` 或 pytest） |
+| YaRN 数值检查 | 旋转维度 24、base 1e7 下斜坡区间为第 1–5 维（共 12 维），未退化；32768 长度缓冲区数值有限。是否需要调 `beta_fast/beta_slow` 仍需长文本实测 |
+
+仍需 GPU / 数据 / 外部服务的项如下。
 
 ### P0：重训主线权重
 
@@ -195,31 +207,24 @@
 
 - 用 mini 数据对比 interval=4（2 层全注意力）与 interval=2（4 层全注意力）的 loss 与简单检索题表现；默认值保持 4，若差距明显则在 README 给出建议。
 
-### P0：生态链路实机验证
+### P0：生态链路实机验证（需 GPU）
 
 - vLLM：确认原生 `qwen3_5` 路径可加载 6400 词表小模型；README 已去掉 `--model-impl transformers`。
 - SGLang：复核 `--attention-backend` 参数在 hybrid 结构下的取值。
-- llama.cpp：验证 `convert_hf_to_gguf.py` 对 `Qwen3_5ForCausalLM` 的转换，含 `mrope_section`、tokenizer pre-hash hack；ollama Modelfile 随之验证。
+- ollama：基于已验证的 GGUF 走一遍 Modelfile。
 
-### P1：训练链路补齐
+### P1：训练链路补齐（需 GPU）
 
-- RL 脚本（GRPO / PPO / Agent）在 GPU 上跑通一轮，重点看左 padding rollout 与 `rollout_engine` SGLang 后端。
-- `train_distillation.py` smoke。
-- fp16 + GradScaler 路径专项检查（bf16 已验证）。
-- DDP 多卡 smoke。
+- RL 脚本接真实 reward model 与 SGLang rollout 后端跑一轮。
+- fp16 + GradScaler 路径（CPU 无法测 fp16 autocast；bf16 已验证）。
+- DDP 多卡 smoke（脚本固定 `nccl` 后端）。
 
-### P1：YaRN 重新标定
+### P1：YaRN 长文本实测
 
-- 旋转维度由 96 降到 24，`beta_fast=32 / beta_slow=1` 的默认值需要在长文本上重新校准，或在 README 说明外推能力受限于 2 层全注意力。
+- 数值上未退化，但 `beta_fast=32 / beta_slow=1` 是否仍是好默认值需要在长文本上验证，或在 README 说明外推能力受限于 2 层全注意力。
 
 ### P2：文档与资产
 
 - 重绘 `images/LLM-structure.jpg` 与 `LLM-structure-moe.jpg`。
 - README 其余提到 `64M / 198M-A64M` 的位置（成本表、评测表）在新权重出来后统一更新。
 - 评估是否同步 Qwen3.5 官方 chat template（当前模板已支持 tools 与 `open_thinking`）。
-
-### P2：代码整理
-
-- `trainer_utils.init_model` 读取权重固定使用 `../out`，忽略 `--save_dir`（历史遗留），可顺手修正。
-- 清理各脚本中 `transformers<5` 的兼容分支。
-- 将本次验收脚本整理为仓库内可复跑的最小测试（需用户同意后再加）。
