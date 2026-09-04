@@ -84,7 +84,7 @@
 
 #### 🎉 本项目包含以下内容
 
-- 提供完整的 MiniMind-LLM 结构代码（Dense + MoE），当前主线结构对齐 `Qwen3 / Qwen3-MoE` 生态。
+- 提供完整的 MiniMind-LLM 结构代码（Dense + MoE），当前主线结构对齐 `Qwen3.5 / Qwen3.5-MoE` 生态（3:1 混合注意力 + Gated DeltaNet + shared expert）。
 - 提供 Tokenizer 与分词器训练代码，支持 `<tool_call>`、`<tool_response>`、`<think>` 等模板标记。
 - 覆盖 Pretrain、SFT、LoRA、RLHF-DPO、RLAIF（PPO / GRPO / CISPO）、Tool Use、Agentic RL、自适应思考与模型蒸馏等完整训练流程。
 - 提供全阶段开源数据，覆盖收集、蒸馏、清洗与去重后的高质量数据集。
@@ -113,6 +113,17 @@
 ---
 
 #### 📝 更新日志
+
+<details>
+<summary> <b>🔥 2026-09-04</b> </summary>
+
+- 主线结构迁移到 `Qwen3.5 / Qwen3.5-MoE`：3:1 混合注意力（Gated DeltaNet + Gated Attention）、零中心 RMSNorm、部分 RoPE（`partial_rotary_factor=0.25`）、`rope_theta=1e7`
+- Dense 导出目标改为 `Qwen3_5ForCausalLM`，MoE 严格对齐 `Qwen3_5MoeForCausalLM`（加回 shared expert + `shared_expert_gate`）
+- 自定义 `generate` 改为混合缓存：全注意力层存 KV，线性层存 conv / recurrent state
+- LoRA 改为按模块名挂载（`q_proj / k_proj / v_proj / o_proj / in_proj_qkv / out_proj`），不再依赖方阵启发式
+- `transformers` 依赖提升到 `>=5.2`，以使用官方 Qwen3.5 模型类
+
+</details>
 
 <details> 
 <summary> <b>🔥 2026-04-01</b> </summary>
@@ -553,14 +564,15 @@ MiniMind训练数据集下载地址： [ModelScope](https://www.modelscope.cn/da
 
 ## 结构
 
-`minimind-3` Dense 使用 Transformer Decoder-Only 结构，整体配置已经向 `Qwen3` 生态对齐，方便后续转换到 `transformers / llama.cpp / ollama / vllm`：
+`minimind-3` Dense 使用 Transformer Decoder-Only 结构，整体配置已经向 `Qwen3.5` 生态对齐，方便后续转换到 `transformers / llama.cpp / ollama / vllm`：
 
-* 采用预标准化（Pre-Norm）+ RMSNorm。
+* 采用预标准化（Pre-Norm）+ 零中心 RMSNorm（`(1 + weight) * norm(x)`）。
 * 使用 SwiGLU 激活函数。
-* 使用 RoPE 旋转位置编码，并支持 YaRN 外推。
-* `q_heads=8`、`kv_heads=4`，`max_position_embeddings=32768`，`rope_theta=1e6`。
+* 使用部分 RoPE（`partial_rotary_factor=0.25`），并支持 YaRN 外推。
+* 3:1 混合注意力：每 4 层中 3 层 Gated DeltaNet（线性注意力）+ 1 层 Gated Attention（输出门控）。
+* `q_heads=8`、`kv_heads=4`，`max_position_embeddings=32768`，`rope_theta=1e7`。
 
-`minimind-3-moe` 在相同结构上扩展 MoE 前馈层，实现上兼容 `Qwen3-MoE` 风格配置（去除 shared expert）。
+`minimind-3-moe` 在相同结构上扩展 MoE 前馈层，实现上兼容 `Qwen3.5-MoE`（含 shared expert + `shared_expert_gate`）。
 
 * 当前默认配置为 `4 experts / top-1 routing`，用于以更低激活参数获得更高容量。
 * Experts 继续增加后，实际耗时往往比同尺寸规模的 dense 模型高非常多，这和 “MoE 推理更快” 放在一起看会有点反直觉，但训练时 token 先按专家分桶、再分别做 forward，原生训练时带来的 `kernel` 启停和调度开销会急剧变重，这本身是很自然的事情。得靠支持 MoE kernel-fused 的算子库来优化，比如基于 `Triton` 的自定义 kernel、`DeepSpeed-MoE`、`Megatron-LM` 等等。当然，这个项目还是希望保留原生 PyTorch 的普适性，所以这里做的是现实的折中，在当前实现下，`4 experts / top-1` 这个甜点配置大约只比 dense 模型慢 `50%` 左右。
@@ -574,8 +586,8 @@ MiniMind训练数据集下载地址： [ModelScope](https://www.modelscope.cn/da
 
 | Model Name | params | len_vocab | max_pos | rope_theta | n_layers | d_model | kv_heads | q_heads | note |
 |------------|--------|-----------|---------|------------|----------|---------|----------|---------|------|
-| minimind-3 | 64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | Dense |
-| minimind-3-moe | 198M-A64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | 4 experts / top-1 |
+| minimind-3 | 68.7M | 6400 | 32768 | 1e7 | 8 | 768 | 4 | 8 | Dense，3:1 hybrid |
+| minimind-3-moe | 248M-A114M | 6400 | 32768 | 1e7 | 8 | 768 | 4 | 8 | 4 experts / top-1 + shared expert |
 | minimind2-small | 26M | 6400 | 32768 | 1e6 | 8 | 512 | 2 | 8 | 历史版本 |
 | minimind2-moe | 145M | 6400 | 32768 | 1e6 | 8 | 640 | 2 | 8 | 历史版本 |
 | minimind2 | 104M | 6400 | 32768 | 1e6 | 16 | 768 | 2 | 8 | 历史版本 |
@@ -1683,7 +1695,7 @@ vLLM 是目前非常常用的高效推理框架，适合快速部署大模型，
 以 OpenAI-compatible API server 形式启动模型：
 
 ```bash
-vllm serve /path/to/model --model-impl transformers --served-model-name "minimind" --port 8998
+vllm serve /path/to/model --served-model-name "minimind" --port 8998
 ```
 
 ## <img src="https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png" height="28" style="vertical-align: middle;"/> [llama.cpp](https://github.com/ggerganov/llama.cpp)
@@ -1708,7 +1720,7 @@ parent/
 
 0、参考 `llama.cpp` 官方文档完成安装（如 `cmake` 等依赖）
 
-1、在 `convert_hf_to_gguf.py` 的 `get_vocab_base_pre` 函数末尾插入：
+1、在 `get_vocab_base_pre` 函数末尾插入（新版 llama.cpp 该函数位于 `conversion/base.py`，旧版位于 `convert_hf_to_gguf.py`）：
 
 ```python
 # 添加 MiniMind tokenizer 支持（此处可临时复用一个兼容项，如 qwen2）
@@ -1720,7 +1732,8 @@ if res is None:
 
 ```bash
 # 在 llama.cpp 目录下执行，将在模型目录下生成对应的 gguf 文件
-python convert_hf_to_gguf.py /path/to/minimind-model
+# minimind 没有 Qwen3.5 的 MTP 头，需要加 --no-mtp
+python convert_hf_to_gguf.py /path/to/minimind-model --no-mtp
 ```
 
 3、量化模型（可选）

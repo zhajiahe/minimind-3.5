@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoTokenizer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import AgentRLDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel
+from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, load_reward_model
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
 
 warnings.filterwarnings('ignore')
@@ -405,7 +405,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug_mode", action="store_true", help="调试模式")
     parser.add_argument("--debug_interval", type=int, default=20, help="调试日志间隔")
     parser.add_argument("--thinking_ratio", type=float, default=0.1, help="按概率开启thinking（0.0~1.0）")
-    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
+    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径（none=仅用规则奖励）")
     parser.add_argument("--rollout_engine", type=str, default="torch", choices=["torch", "sglang"], help="rollout引擎类型")
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="../model", help="SGLang tokenizer路径")
@@ -432,13 +432,12 @@ if __name__ == "__main__":
         resume = 'must' if wandb_id else None
         wandb.init(project=args.wandb_project, name=f"Agent-RL-E{args.epochs}-B{args.batch_size}-LR{args.learning_rate}", id=wandb_id, resume=resume)
 
-    model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, args.from_weight, save_dir=args.save_dir, device=args.device)
 
-    ref_model, _ = init_model(lm_config, args.from_weight, device=args.device)
+    ref_model, _ = init_model(lm_config, args.from_weight, save_dir=args.save_dir, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
 
-    reward_model = LMForRewardModel(args.reward_model_path, device=args.device, dtype=torch.float16)
-    Logger(f'Loaded reward model from {args.reward_model_path}')
+    reward_model = load_reward_model(args.reward_model_path, device=args.device, dtype=torch.float16)
     # Rollout引擎
     rollout_engine = create_rollout_engine(
         engine_type=args.rollout_engine,

@@ -126,7 +126,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、应用LoRA、冻结非LoRA参数 ==========
-    model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, args.from_weight, save_dir=args.save_dir, device=args.device)
     apply_lora(model)
     
     # 统计参数
