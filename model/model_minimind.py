@@ -152,7 +152,8 @@ def chunk_gated_delta_rule(query, key, value, g, beta, chunk_size=64, initial_st
     initial_dtype = query.dtype
     batch_size, sequence_length, _, k_head_dim = key.shape
     num_v_heads, v_head_dim = value.shape[-2:]
-    query, key, value, beta, decay = [x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (query, key, value, beta, g)]
+    # explicit contiguous(): a same-dtype `.to(memory_format=...)` is dropped by torch.compile and breaks the backward reshape
+    query, key, value, beta, decay = [x.transpose(1, 2).contiguous().float() for x in (query, key, value, beta, g)]
     if use_qk_l2norm_in_kernel:
         query, key = l2norm(query), l2norm(key)
     query = query * (query.shape[-1] ** -0.5)
@@ -182,14 +183,14 @@ def chunk_gated_delta_rule(query, key, value, g, beta, chunk_size=64, initial_st
         last_recurrent_state = last_recurrent_state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ v_new
     last_recurrent_state = last_recurrent_state if output_final_state else None
     core_attn_out = core_attn_out.reshape(batch_size, num_v_heads, -1, v_head_dim)[:, :, :sequence_length]
-    return core_attn_out.transpose(1, 2).to(initial_dtype, memory_format=torch.contiguous_format), last_recurrent_state
+    return core_attn_out.transpose(1, 2).contiguous().to(initial_dtype), last_recurrent_state
 
 
 def recurrent_gated_delta_rule(query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm_in_kernel=True):
     initial_dtype = query.dtype
     batch_size, sequence_length, _, k_head_dim = key.shape
     num_v_heads, v_head_dim = value.shape[-2:]
-    query, key, value, beta, decay = [x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (query, key, value, beta, g)]
+    query, key, value, beta, decay = [x.transpose(1, 2).contiguous().float() for x in (query, key, value, beta, g)]
     if use_qk_l2norm_in_kernel:
         query, key = l2norm(query), l2norm(key)
     query = query / (query.shape[-1] ** 0.5)
@@ -414,6 +415,15 @@ class MiniMindModel(nn.Module):
         freqs_cos, freqs_sin = precompute_freqs_cis(dim=config.rotary_dim, end=config.max_position_embeddings, rope_base=config.rope_theta, rope_scaling=config.rope_scaling)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        self._rope_checked = False
+
+    def _ensure_rope(self, device):
+        # Recompute RoPE buffers lost during meta-device init (transformers>=5.x); python flag keeps torch.compile graph intact
+        if self._rope_checked: return
+        if self.freqs_cos.numel() == 0 or bool((self.freqs_cos[0, 0] == 0).item()):
+            freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.rotary_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
+            self.freqs_cos, self.freqs_sin = freqs_cos.to(device), freqs_sin.to(device)
+        self._rope_checked = True
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
         batch_size, seq_length = input_ids.shape
@@ -421,10 +431,7 @@ class MiniMindModel(nn.Module):
         past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = cache_seq_len(past_key_values, self.config.layer_types)
         hidden_states = self.dropout(self.embed_tokens(input_ids))
-        # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
-        if self.freqs_cos.numel() == 0 or self.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.rotary_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
-            self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
+        self._ensure_rope(hidden_states.device)
         position_embeddings = (self.freqs_cos[start_pos:start_pos + seq_length], self.freqs_sin[start_pos:start_pos + seq_length])
         presents = []
         for layer, past_key_value in zip(self.layers, past_key_values):
