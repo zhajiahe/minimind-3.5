@@ -1720,7 +1720,7 @@ parent/
 
 0、参考 `llama.cpp` 官方文档完成安装（如 `cmake` 等依赖）
 
-1、在 `convert_hf_to_gguf.py` 的 `get_vocab_base_pre` 函数末尾插入：
+1、在 `get_vocab_base_pre` 函数末尾插入（新版 llama.cpp 该函数位于 `conversion/base.py`，旧版位于 `convert_hf_to_gguf.py`）：
 
 ```python
 # 添加 MiniMind tokenizer 支持（此处可临时复用一个兼容项，如 qwen2）
@@ -1732,7 +1732,8 @@ if res is None:
 
 ```bash
 # 在 llama.cpp 目录下执行，将在模型目录下生成对应的 gguf 文件
-python convert_hf_to_gguf.py /path/to/minimind-model
+# minimind 没有 Qwen3.5 的 MTP 头，需要加 --no-mtp
+python convert_hf_to_gguf.py /path/to/minimind-model --no-mtp
 ```
 
 3、量化模型（可选）
