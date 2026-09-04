@@ -5,7 +5,6 @@ import json
 __package__ = "scripts"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import torch
-import transformers
 import warnings
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
@@ -68,12 +67,12 @@ def _remap_moe_experts(state_dict, lm_config):
 def _save_tokenizer(transformers_path):
     tokenizer = AutoTokenizer.from_pretrained('../model/')
     tokenizer.save_pretrained(transformers_path)
-    if int(transformers.__version__.split('.')[0]) >= 5:
-        tokenizer_config_path = os.path.join(transformers_path, "tokenizer_config.json")
-        json.dump(
-            {**json.load(open(tokenizer_config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}},
-            open(tokenizer_config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False
-        )
+    # transformers>=5 需要显式 tokenizer_class，否则 AutoTokenizer 无法回载
+    tokenizer_config_path = os.path.join(transformers_path, "tokenizer_config.json")
+    json.dump(
+        {**json.load(open(tokenizer_config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}},
+        open(tokenizer_config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False
+    )
 
 
 def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=torch.float16):
