@@ -17,11 +17,12 @@ from model.model_minimind import MiniMindForCausalLM
 
 def get_model_params(model, config):
     total = sum(p.numel() for p in model.parameters()) / 1e6
-    n_routed = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', 0))
-    n_active = getattr(config, 'num_experts_per_tok', 0)
-    n_shared = getattr(config, 'n_shared_experts', 0)
+    use_moe = getattr(config, 'use_moe', False)
+    n_routed = getattr(config, 'num_experts', 0) if use_moe else 0
+    n_active = getattr(config, 'num_experts_per_tok', 0) if use_moe else 0
+    n_shared = getattr(config, 'n_shared_experts', 1 if use_moe else 0) if use_moe else 0
     expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.experts.0.' in n) / 1e6
-    shared_expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.shared_experts.0.' in n) / 1e6
+    shared_expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.shared_expert.' in n and 'shared_expert_gate' not in n) / 1e6
     base = total - (expert * n_routed) - (shared_expert * n_shared)
     active = base + (expert * n_active) + (shared_expert * n_shared)
     if active < total: Logger(f'Model Params: {total:.2f}M-A{active:.2f}M')

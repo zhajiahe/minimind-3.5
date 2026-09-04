@@ -84,7 +84,7 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 
 #### 🎉 This Project Includes the Following
 
-- Provides the full MiniMind-LLM architecture implementation (Dense + MoE), aligned with the `Qwen3 / Qwen3-MoE` ecosystem.
+- Provides the full MiniMind-LLM architecture implementation (Dense + MoE), aligned with the `Qwen3.5 / Qwen3.5-MoE` ecosystem (3:1 hybrid attention + Gated DeltaNet + shared expert).
 - Provides the tokenizer and tokenizer training code, supporting template tokens such as `<tool_call>`, `<tool_response>`, `<think>`, etc.
 - Covers end-to-end training pipelines including pretraining, SFT, LoRA, RLHF-DPO, RLAIF (PPO / GRPO / CISPO), Tool Use, Agentic RL, Adaptive Thinking, and Model Distillation.
 - Provides open-source data for all stages, covering collected, distilled, cleaned, and deduplicated high-quality datasets.
@@ -112,6 +112,17 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 ---
 
 #### 📝 Changelog
+
+<details>
+<summary> <b>🔥 2026-09-04</b> </summary>
+
+- Migrated the main architecture to `Qwen3.5 / Qwen3.5-MoE`: 3:1 hybrid attention (Gated DeltaNet + Gated Attention), zero-centered RMSNorm, partial RoPE (`partial_rotary_factor=0.25`), `rope_theta=1e7`
+- Dense export target is now `Qwen3_5ForCausalLM`; MoE strictly follows `Qwen3_5MoeForCausalLM` (shared expert + `shared_expert_gate`)
+- Custom `generate` uses a hybrid cache: KV for full-attention layers, conv / recurrent state for linear layers
+- LoRA now targets named modules (`q_proj / k_proj / v_proj / o_proj / in_proj_qkv / out_proj`) instead of square-linear heuristics
+- Bumped `transformers` to `>=5.2` for official Qwen3.5 model classes
+
+</details>
 
 <details> 
 <summary> <b>🔥 2026-04-01</b> </summary>
@@ -552,14 +563,15 @@ In practice, it is enough to balance compute efficiency and semantic completenes
 
 ## Structure
 
-`minimind-3` Dense uses a Transformer Decoder-Only architecture, with its overall configuration aligned with the `Qwen3` ecosystem for easier conversion to `transformers / llama.cpp / ollama / vllm`:
+`minimind-3` Dense uses a Transformer Decoder-Only architecture, with its overall configuration aligned with the `Qwen3.5` ecosystem for easier conversion to `transformers / llama.cpp / ollama / vllm`:
 
-* Uses Pre-Normalization (Pre-Norm) + RMSNorm.
+* Uses Pre-Normalization (Pre-Norm) + zero-centered RMSNorm (`(1 + weight) * norm(x)`).
 * Uses SwiGLU activation function.
-* Uses RoPE rotary positional encoding, with YaRN extrapolation support.
-* `q_heads=8`, `kv_heads=4`, `max_position_embeddings=32768`, `rope_theta=1e6`.
+* Uses partial RoPE (`partial_rotary_factor=0.25`), with YaRN extrapolation support.
+* 3:1 hybrid attention: 3 Gated DeltaNet (linear attention) layers for every 1 Gated Attention layer.
+* `q_heads=8`, `kv_heads=4`, `max_position_embeddings=32768`, `rope_theta=1e7`.
 
-`minimind-3-moe` extends MoE feed-forward layers on the same structure, with implementation compatible with `Qwen3-MoE` style configuration (removing shared expert).
+`minimind-3-moe` extends MoE feed-forward layers on the same structure, compatible with `Qwen3.5-MoE` (shared expert + `shared_expert_gate`).
 
 * The current default configuration is `4 experts / top-1 routing`, to achieve higher capacity with lower active parameters.
 * As the number of experts increases, training can become much slower than a dense model of similar size. This may seem counterintuitive given the common claim that "MoE inference is faster", but in training, tokens are first bucketed by expert and then forwarded separately. In a native PyTorch implementation, kernel launch and scheduling overhead quickly become significant. This usually requires fused MoE kernels or specialized libraries such as `Triton`, `DeepSpeed-MoE`, or `Megatron-LM` for optimization. MiniMind keeps the implementation in native PyTorch for portability, so this is a practical trade-off. Under the current implementation, the `4 experts / top-1` configuration is only about `50%` slower than the dense model.
@@ -573,8 +585,8 @@ To modify model configuration, see [./model/model_minimind.py](./model/model_min
 
 | Model Name | params | len_vocab | max_pos | rope_theta | n_layers | d_model | kv_heads | q_heads | note |
 |------------|--------|-----------|---------|------------|----------|---------|----------|---------|------|
-| minimind-3 | 64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | Dense |
-| minimind-3-moe | 198M-A64M | 6400 | 32768 | 1e6 | 8 | 768 | 4 | 8 | 4 experts / top-1 |
+| minimind-3 | 68.7M | 6400 | 32768 | 1e7 | 8 | 768 | 4 | 8 | Dense, 3:1 hybrid |
+| minimind-3-moe | 248M-A114M | 6400 | 32768 | 1e7 | 8 | 768 | 4 | 8 | 4 experts / top-1 + shared expert |
 | minimind2-small | 26M | 6400 | 32768 | 1e6 | 8 | 512 | 2 | 8 | Historical version |
 | minimind2-moe | 145M | 6400 | 32768 | 1e6 | 8 | 640 | 2 | 8 | Historical version |
 | minimind2 | 104M | 6400 | 32768 | 1e6 | 16 | 768 | 2 | 8 | Historical version |
@@ -1683,7 +1695,7 @@ vLLM is a widely used efficient inference framework for rapid LLM deployment, wi
 Launch the model as an OpenAI-compatible API server:
 
 ```bash
-vllm serve /path/to/model --model-impl transformers --served-model-name "minimind" --port 8998
+vllm serve /path/to/model --served-model-name "minimind" --port 8998
 ```
 
 ## <img src="https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png" height="28" style="vertical-align: middle;"/> [llama.cpp](https://github.com/ggerganov/llama.cpp)

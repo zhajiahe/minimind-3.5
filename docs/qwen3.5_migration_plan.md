@@ -6,6 +6,8 @@
 
 **目标**：把主线结构切换到 Qwen3.5 文本骨架（`Qwen3_5ForCausalLM`，`model_type=qwen3_5_text`），保持"原生 PyTorch 训练 → 无损导出 HF 格式 → 复用生态"的工作流不变。
 
+**已锁定决策（2026-09-04）**：MoE 严格对齐 `Qwen3_5MoeForCausalLM`（含 shared expert）；`full_attention_interval=4`；`rope_theta=1e7` 等超参与官方对齐。
+
 **范围界定**：
 
 - 只做文本骨架。Qwen3.5 的视觉塔（`Qwen3_5VisionModel`）、MTP 头（`mtp.*`）不在范围内；导出时 `Qwen3_5ForCausalLM` 会自动忽略这两部分权重键。

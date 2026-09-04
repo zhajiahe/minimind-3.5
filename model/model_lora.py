@@ -1,5 +1,8 @@
 import torch
-from torch import optim, nn
+from torch import nn
+
+
+DEFAULT_LORA_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "in_proj_qkv", "out_proj")
 
 
 # 定义Lora网络结构
@@ -18,9 +21,10 @@ class LoRA(nn.Module):
         return self.B(self.A(x))
 
 
-def apply_lora(model, rank=16):
+def apply_lora(model, rank=16, target_modules=None):
+    target_modules = tuple(target_modules) if target_modules is not None else DEFAULT_LORA_MODULES
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) and module.in_features == module.out_features:
+        if isinstance(module, nn.Linear) and name.rsplit(".", 1)[-1] in target_modules:
             lora = LoRA(module.in_features, module.out_features, rank=rank).to(model.device)
             setattr(module, "lora", lora)
             original_forward = module.forward
