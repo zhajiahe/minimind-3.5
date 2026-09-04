@@ -139,14 +139,9 @@
 
 所有临时验证脚本放在仓库外（`/tmp`），不进入提交。
 
-## 6. 交付拆分（建议 PR 顺序）
+## 6. 交付拆分
 
-1. 配置字段 + RMSNorm 零中心化 + 部分 RoPE + Gated Attention（不改层类型，`layer_types` 全为 `full_attention`，可与旧结构做纯 attention 对照）。
-2. GatedDeltaNet 模块 + 混合缓存 + `generate` 改造，默认切到 3:1。
-3. `convert_model.py` 导出到 `Qwen3_5ForCausalLM` + 依赖升级 + 双向转换验证。
-4. LoRA 目标模块显式化 + 训练脚本 smoke。
-5. README / 图片 / 生态命令更新。
-6. （可选）MoE 加回 shared expert，导出到 `Qwen3_5MoeForCausalLM`。
+原计划分 6 个 PR，实际按用户要求在 PR #2 一次性落地了 1–6 项（含 MoE shared expert）。图片重绘与新权重训练见第 9 节。
 
 ## 7. 风险与待决策项
 
@@ -154,5 +149,77 @@
 - **8 层里只有 2 层全注意力**：小模型在检索类任务上可能退化。建议对 `full_attention_interval=2`（4 层全注意力）做一次消融再定默认值；官方最小的 Qwen3.5-0.8B 是 24 层 3:1。
 - **权重不兼容**：旧的 `minimind-3` 权重无法迁移，需要完整重跑 pretrain 与 SFT 主线，是本次迁移最大的成本项。
 - **transformers 5.x 升级的连带影响**：所有脚本要在新版本下回归一遍，尤其是 tokenizer 保存与 `config.json` 后处理逻辑。
-- **MoE 设计取舍**：是否加回 shared expert 需要在实施 MoE 部分前确定（见阶段 2 第 7 点）。
+- **MoE 设计取舍**：已决策加回 shared expert，严格对齐 `Qwen3_5MoeForCausalLM`。
 - **YaRN 外推**：仅对 2 层全注意力生效，且旋转维度缩小为 24，`beta_fast/beta_slow` 的默认值需重新标定。
+
+## 8. 验收结果（2026-09-04，CPU 环境）
+
+阶段 1–4 已在 PR #2 一次性落地，验收项与结果：
+
+| 验证项 | 结果 |
+|---|---|
+| chunk vs recurrent delta 规则一致性 | 通过，误差 ~1e-7 |
+| prefill vs 逐 token decode；`generate` 有/无 cache | 通过，贪心输出完全一致 |
+| 右 padding / 左 padding 批量生成与单条一致 | 通过 |
+| 原生 vs `Qwen3_5ForCausalLM` / `Qwen3_5MoeForCausalLM` logits | 通过，误差 ~2e-6，键名严格对齐 |
+| `convert_model.py` 导出 → `AutoModelForCausalLM` 回载 → 回转 `.pth` strict 加载 | 通过 |
+| HF `generate` 与原生 `generate` 贪心一致 | 通过 |
+| Dense / MoE 训练步（fp32、bf16 autocast），所有参数均有梯度 | 通过 |
+| LoRA 训练 → save → merge → 基模 strict 加载 | 通过 |
+| YaRN 路径前向 | 通过 |
+| `torch.compile`（inductor）训练步，梯度与 eager 对比 | 通过，误差 ~5e-7，单图无中断 |
+| `train_pretrain / train_full_sft / train_lora / train_dpo` 最小 smoke | 通过 |
+| `eval_llm.py` 原生路径 | 通过 |
+| CPU 相对吞吐（hidden 768，8 层，batch 4） | hybrid 比全注意力慢：T=340 约 1.5x，T=768 约 1.6x |
+
+验收中修复的问题：
+
+- `chunk/recurrent_gated_delta_rule` 中 `.to(dtype, memory_format=...)` 改为显式 `.contiguous()`。
+- `MiniMindModel.forward` 中 RoPE 缓冲区的数据相关判断改为一次性 Python 标志，消除 `torch.compile` 图中断。
+
+已知非阻塞项：`aot_eager` 调试后端下 `Linear → softplus → transpose` 反向会报 `view` 错误，属 PyTorch 侧问题，inductor 正常，HF 参考实现写法相同。
+
+实测参数量：Dense 68.74M；MoE 248.08M-A113.60M。
+
+## 9. 后续工作
+
+按优先级排列，前三项是发布新权重前的必需项。
+
+### P0：重训主线权重
+
+- 旧 `minimind-3` 权重不可加载，需从零重跑 `pretrain_t2t → sft_t2t → rlaif / agent_rl`。
+- 先用 `pretrain_t2t_mini` 跑一次短程对照：新结构 vs 老结构（`git checkout master` 的 `model_minimind.py`）在同 token 预算下的 loss 曲线与 tokens/s，作为 GPU 上的真实性能基线。
+- 若 GPU 吞吐下降超过 30%，评估接入 `flash-linear-attention`（`fla`）与 `causal-conv1d` 作为可选快路径（检测到即用，缺失则回落纯 PyTorch）。
+
+### P0：`full_attention_interval` 消融
+
+- 用 mini 数据对比 interval=4（2 层全注意力）与 interval=2（4 层全注意力）的 loss 与简单检索题表现；默认值保持 4，若差距明显则在 README 给出建议。
+
+### P0：生态链路实机验证
+
+- vLLM：确认原生 `qwen3_5` 路径可加载 6400 词表小模型；README 已去掉 `--model-impl transformers`。
+- SGLang：复核 `--attention-backend` 参数在 hybrid 结构下的取值。
+- llama.cpp：验证 `convert_hf_to_gguf.py` 对 `Qwen3_5ForCausalLM` 的转换，含 `mrope_section`、tokenizer pre-hash hack；ollama Modelfile 随之验证。
+
+### P1：训练链路补齐
+
+- RL 脚本（GRPO / PPO / Agent）在 GPU 上跑通一轮，重点看左 padding rollout 与 `rollout_engine` SGLang 后端。
+- `train_distillation.py` smoke。
+- fp16 + GradScaler 路径专项检查（bf16 已验证）。
+- DDP 多卡 smoke。
+
+### P1：YaRN 重新标定
+
+- 旋转维度由 96 降到 24，`beta_fast=32 / beta_slow=1` 的默认值需要在长文本上重新校准，或在 README 说明外推能力受限于 2 层全注意力。
+
+### P2：文档与资产
+
+- 重绘 `images/LLM-structure.jpg` 与 `LLM-structure-moe.jpg`。
+- README 其余提到 `64M / 198M-A64M` 的位置（成本表、评测表）在新权重出来后统一更新。
+- 评估是否同步 Qwen3.5 官方 chat template（当前模板已支持 tools 与 `open_thinking`）。
+
+### P2：代码整理
+
+- `trainer_utils.init_model` 读取权重固定使用 `../out`，忽略 `--save_dir`（历史遗留），可顺手修正。
+- 清理各脚本中 `transformers<5` 的兼容分支。
+- 将本次验收脚本整理为仓库内可复跑的最小测试（需用户同意后再加）。
