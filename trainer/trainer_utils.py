@@ -158,6 +158,14 @@ class SkipBatchSampler(Sampler):
         return max(0, total_batches - self.skip_batches)
 
 
+def load_reward_model(model_path, device="cuda", dtype=torch.float16):
+    """reward_model_path 为 none/空 时返回 None，训练只用规则奖励"""
+    if not model_path or str(model_path).lower() == 'none':
+        Logger('Reward model disabled: using rule-based rewards only')
+        return None
+    return LMForRewardModel(model_path, device=device, dtype=dtype)
+
+
 class LMForRewardModel:
     def __init__(self, model_path, device="cuda", dtype=torch.float16):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)

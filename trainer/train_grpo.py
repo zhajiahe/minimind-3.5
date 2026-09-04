@@ -22,7 +22,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import AutoModel
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel
+from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, load_reward_model
 from trainer.rollout_engine import create_rollout_engine
 
 warnings.filterwarnings('ignore')
@@ -59,11 +59,11 @@ def calculate_rewards(prompts, responses, reward_model):
                     answer = answer_content.strip()
                 rewards[response_idx] -= rep_penalty(answer)
 
-                score = reward_model.get_score(messages, answer)
-                reward_model_scores.append(score)
+                if reward_model is not None:
+                    reward_model_scores.append(reward_model.get_score(messages, answer))
 
-        reward_model_scores = torch.tensor(reward_model_scores, device=args.device)
-        rewards += reward_model_scores
+        if reward_model_scores:
+            rewards += torch.tensor(reward_model_scores, device=args.device)
 
     return rewards
 
@@ -229,7 +229,7 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, default=0.2, help="GRPO的PPO clip epsilon")
     parser.add_argument("--epsilon_high", type=float, default=5.0, help="epsilon上界")
     parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
-    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
+    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径（none=仅用规则奖励）")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-GRPO", help="wandb项目名")
@@ -271,12 +271,12 @@ if __name__ == "__main__":
     # ========== 5. 初始化模型和数据 ==========
     base_weight = args.from_weight
     # Policy模型
-    model, tokenizer = init_model(lm_config, base_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, base_weight, save_dir=args.save_dir, device=args.device)
     # Reference模型
-    ref_model, _ = init_model(lm_config, base_weight, device=args.device)
+    ref_model, _ = init_model(lm_config, base_weight, save_dir=args.save_dir, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
     # Reward模型
-    reward_model = LMForRewardModel(args.reward_model_path, device=args.device, dtype=torch.float16)
+    reward_model = load_reward_model(args.reward_model_path, device=args.device, dtype=torch.float16)
     # Rollout引擎（可插拔替换，只负责 policy 推理）
     rollout_engine = create_rollout_engine(
         engine_type=args.rollout_engine,

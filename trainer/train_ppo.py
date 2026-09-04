@@ -20,7 +20,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel
+from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, load_reward_model
 from trainer.rollout_engine import create_rollout_engine
 
 warnings.filterwarnings('ignore')
@@ -66,11 +66,11 @@ def calculate_rewards(prompts, responses, reward_model):
                 answer = answer_content.strip()
             rewards[i] -= rep_penalty(answer)
 
-            score = reward_model.get_score(messages, answer)
-            reward_model_scores.append(score)
+            if reward_model is not None:
+                reward_model_scores.append(reward_model.get_score(messages, answer))
 
-        reward_model_scores = torch.tensor(reward_model_scores, device=args.device)
-        rewards += reward_model_scores
+        if reward_model_scores:
+            rewards += torch.tensor(reward_model_scores, device=args.device)
 
     return rewards
 
@@ -337,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--early_stop_kl", type=float, default=0.25, help="PPO early stop 的 KL 阈值")
     parser.add_argument("--mini_batch_size", type=int, default=2, help="PPO每次更新的minibatch大小")
     parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
-    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
+    parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径（none=仅用规则奖励）")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-PPO", help="wandb项目名")
@@ -379,8 +379,8 @@ if __name__ == "__main__":
     # ========== 5. 初始化模型和数据 ==========
     base_weight = args.from_weight
     # Actor模型
-    actor_model, tokenizer = init_model(lm_config, base_weight, device=args.device)
-    ref_model, _ = init_model(lm_config, base_weight, device=args.device)
+    actor_model, tokenizer = init_model(lm_config, base_weight, save_dir=args.save_dir, device=args.device)
+    ref_model, _ = init_model(lm_config, base_weight, save_dir=args.save_dir, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
     moe_suffix = '_moe' if lm_config.use_moe else ''
     ckp = f'{args.save_dir}/{base_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -388,7 +388,7 @@ if __name__ == "__main__":
     critic_model = CriticModel(lm_config)
     critic_model.load_state_dict(state_dict, strict=False)
     critic_model = critic_model.to(args.device)
-    reward_model = LMForRewardModel(args.reward_model_path, device=args.device, dtype=torch.float16)
+    reward_model = load_reward_model(args.reward_model_path, device=args.device, dtype=torch.float16)
     # Rollout引擎
     rollout_engine = create_rollout_engine(
         engine_type=args.rollout_engine,
