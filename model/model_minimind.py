@@ -37,7 +37,8 @@ class MiniMindConfig(PretrainedConfig):
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)
         self.hidden_act = kwargs.get("hidden_act", 'silu')
         self.intermediate_size = kwargs.get("intermediate_size", math.ceil(hidden_size * math.pi / 64) * 64)
-        self.max_position_embeddings = kwargs.get("max_position_embeddings", max_seq_len or 32768)
+        self.max_position_embeddings = kwargs.get("max_position_embeddings", 32768)
+        # 训练截断长度，仅供训练脚本读取；不影响 RoPE 缓冲区长度
         self.max_seq_len = max_seq_len or self.max_position_embeddings
         self.rms_norm_eps = kwargs.get("rms_norm_eps", 1e-6)
         self.rope_theta = kwargs.get("rope_theta", 1e7)
