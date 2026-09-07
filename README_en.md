@@ -94,7 +94,8 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 - Supports evaluation on third-party benchmark suites such as C-Eval, C-MMLU, OpenBookQA, etc., and supports RoPE long context extrapolation through YaRN.
 - Provides a lightweight OpenAI-compatible API server for integration with third-party Chat UIs such as FastGPT and Open-WebUI, with support for `reasoning_content`, `tool_calls`, and `open_thinking`.
 - Provides a minimalist chat WebUI based on Streamlit, supporting thinking display, tool selection, and multi-turn Tool Call.
-- Includes experimental extensions: diffusion language model ([dLM](https://github.com/jingyaogong/minimind/discussions/618)) and linear attention model ([Linear Attention](https://github.com/jingyaogong/minimind/discussions/704)), both of which can be further trained from the main autoregressive model.
+- Includes experimental extensions: diffusion language model ([dLM](https://github.com/jingyaogong/minimind/discussions/618)) and the early linear-attention experiment ([Linear Attention](https://github.com/jingyaogong/minimind/discussions/704), whose idea has since landed in the mainline as Gated DeltaNet), both of which can be further trained from the main autoregressive model.
+- Ships a minimal regression suite `tests/test_model.py` (~20s on CPU) covering forward pass, cache consistency, training backward, LoRA and export to Qwen3.5 weights.
 
 #### 🎉 Released Model List
 
@@ -108,6 +109,10 @@ At the same time, third-party LLM frameworks and toolkits such as `transformers`
 | minimind-v1-small | 26M | 2024.08.28 |
 | minimind-v1-moe | 4×26M | 2024.09.17 |
 | minimind-v1 | 108M | 2024.09.01 |
+
+> ⚠️ Compatibility note: since `2026-09-04` the mainline code has migrated to the `Qwen3.5` architecture (see changelog). The released `minimind-3` weights above still use the old `Qwen3` architecture:
+> - `transformers`-format weights (`minimind-3` / `minimind-3-moe` folders) are unaffected; `eval_llm.py --load_from`, `vllm`, `ollama`, etc. keep working;
+> - native `*.pth` weights cannot be loaded by the current `model_minimind.py` and must be retrained following the training pipeline below; weights for the new architecture will be released once training is done.
 
 ---
 
@@ -240,7 +245,11 @@ After this update, maintenance for the entire `minimind-v1` series will be disco
 # Clone repository and install dependencies
 git clone --depth 1 https://github.com/jingyaogong/minimind
 cd minimind && pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+# (Optional) run the minimal regression suite to verify the environment and model code (~20s on CPU)
+python tests/test_model.py
 ```
+
+> Requires `python>=3.10` and `transformers>=5.2` (provides the official `Qwen3_5ForCausalLM` / `Qwen3_5MoeForCausalLM` classes; only needed for export).
 
 ## Ⅰ 🚀 Model Inference
 
@@ -344,7 +353,7 @@ cd trainer && python train_full_sft.py
 
 #### 2.3 Test Trained Model (Optional)
 
-Ensure the model `*.pth` files to be tested are located in the `./out/` directory; you can also go directly to [here](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch/files) to download my pre-trained `*.pth` weights.
+Ensure the model `*.pth` files to be tested are located in the `./out/` directory (the `*.pth` files published [here](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch/files) use the old architecture and are not compatible with the current code; see the compatibility note above).
 
 ```bash
 python eval_llm.py --weight full_sft
@@ -368,6 +377,10 @@ torchrun --nproc_per_node N train_xxx.py
 ```bash
 ... train_xxx.py --use_wandb
 ```
+
+4. All training scripts support `--device cpu` (the default falls back to CPU when no GPU is present), and every pipeline has been smoke-tested on pure CPU. CPU throughput is only suitable for debugging and validating code; use a GPU for real training. RL scripts accept `--reward_model_path none` to skip the reward model and use rule-based rewards only.
+
+5. All training scripts take `--save_dir` (default `../out`) for the weight directory; weights from the previous stage are loaded from the same directory.
 After June `2025`, domestic network environments in China typically cannot directly connect to WandB. MiniMind currently defaults to using [SwanLab](https://swanlab.cn/) as the training visualization tool, whose interface is basically compatible with WandB; usually you only need to replace `import wandb` with `import swanlab as wandb`, and other usage remains largely unchanged.
 
 </details>
@@ -568,8 +581,10 @@ In practice, it is enough to balance compute efficiency and semantic completenes
 * Uses Pre-Normalization (Pre-Norm) + zero-centered RMSNorm (`(1 + weight) * norm(x)`).
 * Uses SwiGLU activation function.
 * Uses partial RoPE (`partial_rotary_factor=0.25`), with YaRN extrapolation support.
-* 3:1 hybrid attention: 3 Gated DeltaNet (linear attention) layers for every 1 Gated Attention layer.
+* 3:1 hybrid attention (`full_attention_interval=4`): in every block of 4 layers, the first 3 are Gated DeltaNet (linear attention: `in_proj_qkv/z/b/a` + causal Conv1D + gated delta rule) and the 4th is Gated Attention (standard GQA with output gating).
 * `q_heads=8`, `kv_heads=4`, `max_position_embeddings=32768`, `rope_theta=1e7`.
+* Hybrid inference cache: full-attention layers keep a KV cache, linear layers keep only a fixed-size `conv_state / recurrent_state`, so memory grows far more slowly with context length than a pure Transformer.
+* Linear layers use the chunked algorithm for training/prefill and the recurrent algorithm for single-step decoding; the two are numerically equivalent (see `tests/test_model.py`). Pure PyTorch, no dependency on `flash-linear-attention` or other external kernels.
 
 `minimind-3-moe` extends MoE feed-forward layers on the same structure, compatible with `Qwen3.5-MoE` (shared expert + `shared_expert_gate`).
 
@@ -591,6 +606,8 @@ To modify model configuration, see [./model/model_minimind.py](./model/model_min
 | minimind2-moe | 145M | 6400 | 32768 | 1e6 | 8 | 640 | 2 | 8 | Historical version |
 | minimind2 | 104M | 6400 | 32768 | 1e6 | 16 | 768 | 2 | 8 | Historical version |
 
+> The two `minimind-3` rows are the measured parameter counts of the current default config; `64M / 198M-A64M` in the training-cost and evaluation tables below refer to the old-architecture weights released on `2026-04-01`, and will be updated once the new-architecture weights are retrained.
+> The `LLM-structure*.jpg` diagrams still depict the old architecture and are pending a redraw.
 
 ## Model Configuration
 
@@ -627,7 +644,7 @@ For reference, GPT-3's parameter settings are as follows:
 - **Time unit**: hours (h)
 - **Cost unit**: CNY (￥); `7￥ ≈ 1 USD`
 - **3090 rental price**: approximately `1.3￥/h` (actual prices may vary)
-- **Note**: The following results are empirical estimates for the `minimind` model on a single `3090` GPU, intended to make the training cost easy to estimate
+- **Note**: The following results are empirical estimates for the `minimind` model on a single `3090` GPU, intended to make the training cost easy to estimate; measured on the old architecture (`64M / 198M-A64M`). GPU throughput of the new architecture is pending re-measurement since the linear layers are pure PyTorch
 
 | Model Name | params | pretrain_t2t_mini | sft_t2t_mini | toolcall | RLAIF |
 |------------|--------|-------------------|--------------|----------|-------|
@@ -773,6 +790,7 @@ python train_distillation.py
 
 LoRA is a common Parameter-Efficient Fine-Tuning (PEFT) method. Compared with full-parameter fine-tuning, it only updates a small number of newly added parameters while keeping the original model weights unchanged, reducing training cost and making it better suited to vertical-domain adaptation.
 Its core idea is to introduce low-rank incremental branches alongside the original weight matrices, training only these low-rank parameters, thereby completing capability transfer with relatively small cost. Related implementations can be found in `model_lora.py` and `train_lora.py`; the entire pipeline is purely hand-written, without relying on third-party wrappers.
+By default LoRA is attached by module name to the attention projections: `q_proj / k_proj / v_proj / o_proj` in full-attention layers and `in_proj_qkv / out_proj` in linear-attention layers; customize via `apply_lora(model, target_modules=...)`.
 
 ```bash
 # train_lora.py can usually be completed fairly quickly even on CPU
@@ -1015,7 +1033,7 @@ High-scoring responses will be encouraged (increasing the $\Pi$ policy probabili
 
 **2️⃣ Reward Mechanism Preparation (Required)**
 
-RLAIF training requires some form of computable reward signal; it can come from a reward model, or from rule functions, Ground Truth verification, or environment feedback. MiniMind currently demonstrates the Reward Model route by default.
+RLAIF training requires some form of computable reward signal; it can come from a reward model, or from rule functions, Ground Truth verification, or environment feedback. MiniMind currently demonstrates the Reward Model route by default; if you do not want to download a reward model yet, `train_ppo.py / train_grpo.py / train_agent.py` all accept `--reward_model_path none`, in which case only the built-in rule-based rewards are used (length, `<think>` formatting, repetition penalty; the Agent script additionally verifies answers).
 
 Here we select the small and high-quality `InternLM2-1.8B-Reward` ([ModelScope](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-1_8b-reward) | [HuggingFace](https://huggingface.co/internlm/internlm2-1_8b-reward)) as the base reward model.
 
@@ -1294,6 +1312,8 @@ Returning to the "**unified framework**", the table below summarizes how differe
 #### ① PyTorch Models ([ModelScope](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch) | [HuggingFace](https://huggingface.co/jingyaogong/minimind-3-pytorch))
 
 > Note: Model weights are subject to actual releases. Not all training stages or experimental branches (such as DPO, PPO, GRPO, CISPO, Agent, LoRA, etc.) will be continuously maintained and separately published; some weights are only used for experimental verification or learning purposes. As data iterates or models are adjusted, the necessity of synchronizing all versions one by one is limited and would incur high maintenance and training costs.
+>
+> The currently released `*.pth` files use the old `Qwen3` architecture and are incompatible with `model_minimind.py` after the `Qwen3.5` migration (`load_state_dict` will report missing keys such as `linear_attn.*` and `shared_expert.*`); `transformers`-format weights are unaffected.
 
 
 <details>

@@ -225,6 +225,7 @@
 
 ### P2：文档与资产
 
-- 重绘 `images/LLM-structure.jpg` 与 `LLM-structure-moe.jpg`。
-- README 其余提到 `64M / 198M-A64M` 的位置（成本表、评测表）在新权重出来后统一更新。
+- 已完成：README（中英）补充旧权重兼容性说明、`tests/test_model.py` 用法、混合缓存 / chunk-recurrent 结构说明、LoRA 目标模块、`--reward_model_path none`、CPU 训练与 `--save_dir` 说明；成本表 / 参数表标注 `64M / 198M-A64M` 为旧结构实测值。
+- 重绘 `images/LLM-structure.jpg` 与 `LLM-structure-moe.jpg`（README 已标注为旧结构示意）。
+- 成本表、评测表中的旧结构数值在新权重出来后统一替换。
 - 评估是否同步 Qwen3.5 官方 chat template（当前模板已支持 tools 与 `open_thinking`）。
