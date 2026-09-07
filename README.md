@@ -94,7 +94,8 @@
 - 支持在 C-Eval、C-MMLU、OpenBookQA 等第三方测评集上进行评测，并支持通过 YaRN 实现 RoPE 长文本外推。
 - 提供兼容 OpenAI API 协议的极简服务端，便于接入 FastGPT、Open-WebUI 等第三方 Chat UI，并支持 `reasoning_content`、`tool_calls`、`open_thinking`。
 - 提供基于 Streamlit 的极简聊天 WebUI，支持思考展示、工具选择与多轮 Tool Call。
-- 包含实验性拓展：离散扩散语言模型（[dLM](https://github.com/jingyaogong/minimind/discussions/618)）与线性注意力模型（[Linear Attention](https://github.com/jingyaogong/minimind/discussions/704)），均可基于主线 AR 模型进行续训。
+- 包含实验性拓展：离散扩散语言模型（[dLM](https://github.com/jingyaogong/minimind/discussions/618)）与早期的线性注意力实验（[Linear Attention](https://github.com/jingyaogong/minimind/discussions/704)，其思路现已以 Gated DeltaNet 形式进入主线结构），均可基于主线 AR 模型进行续训。
+- 附带最小回归测试 `tests/test_model.py`（CPU 约 20s），覆盖前向 / 缓存一致性 / 训练反向 / LoRA / 导出 Qwen3.5 权重。
 
 #### 🎉 已发布模型列表
 
@@ -108,6 +109,10 @@
 | minimind-v1-small | 26M | 2024.08.28 |
 | minimind-v1-moe | 4×26M | 2024.09.17 |
 | minimind-v1 | 108M | 2024.09.01 |
+
+> ⚠️ 结构兼容性说明：`2026-09-04` 起主线代码已迁移到 `Qwen3.5` 结构（见更新日志）。上表已发布的 `minimind-3` 系列权重仍是旧的 `Qwen3` 结构：
+> - `transformers` 格式（`minimind-3` / `minimind-3-moe` 文件夹）不受影响，`eval_llm.py --load_from`、`vllm`、`ollama` 等照常可用；
+> - `*.pth` 原生权重无法被当前 `model_minimind.py` 加载，需按下文训练流程重新训练；基于新结构的权重将在训练完成后另行发布。
 
 
 ---
@@ -241,7 +246,11 @@ minimind2系列旧模型均经过权重映射+（微调训练）QKVO线性层校
 # 克隆仓库、安装依赖
 git clone --depth 1 https://github.com/jingyaogong/minimind
 cd minimind && pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+# （可选）跑一遍最小回归测试，确认环境与模型代码正常（CPU 约 20s）
+python tests/test_model.py
 ```
+
+> 需要 `python>=3.10`、`transformers>=5.2`（提供官方 `Qwen3_5ForCausalLM` / `Qwen3_5MoeForCausalLM` 类，仅导出时依赖）。
 
 ## Ⅰ 🚀 模型推理
 
@@ -345,7 +354,7 @@ cd trainer && python train_full_sft.py
 
 #### 2.3 测试已训练模型（可选）
 
-确保待测试的模型 `*.pth` 文件位于 `./out/` 目录下；也可直接前往[此处](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch/files)下载我已训练好的 `*.pth` 权重。
+确保待测试的模型 `*.pth` 文件位于 `./out/` 目录下（[此处](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch/files)已发布的 `*.pth` 为旧结构权重，不兼容当前代码，见上文兼容性说明）。
 
 ```bash
 python eval_llm.py --weight full_sft
@@ -369,6 +378,10 @@ torchrun --nproc_per_node N train_xxx.py
 ```bash
 ... train_xxx.py --use_wandb
 ```
+
+4、所有训练脚本均支持 `--device cpu`（无 GPU 时自动回落），全部链路已在纯 CPU 上 smoke 通过；但 CPU 吞吐仅适合调试与验证代码，正式训练仍建议使用 GPU。RL 脚本可通过 `--reward_model_path none` 跳过奖励模型、只用规则奖励。
+
+5、所有训练脚本通过 `--save_dir` 指定权重目录（默认 `../out`），加载上一阶段权重时同样从该目录读取。
 `2025` 年 `6` 月后，国内网络环境通常无法直连 WandB。MiniMind 当前默认转为使用 [SwanLab](https://swanlab.cn/) 作为训练可视化工具，其接口与 WandB 基本兼容；通常只需将 `import wandb` 替换为 `import swanlab as wandb`，其余调用方式基本无需改动。
 
 </details>
@@ -569,8 +582,10 @@ MiniMind训练数据集下载地址： [ModelScope](https://www.modelscope.cn/da
 * 采用预标准化（Pre-Norm）+ 零中心 RMSNorm（`(1 + weight) * norm(x)`）。
 * 使用 SwiGLU 激活函数。
 * 使用部分 RoPE（`partial_rotary_factor=0.25`），并支持 YaRN 外推。
-* 3:1 混合注意力：每 4 层中 3 层 Gated DeltaNet（线性注意力）+ 1 层 Gated Attention（输出门控）。
+* 3:1 混合注意力（`full_attention_interval=4`）：每 4 层中前 3 层为 Gated DeltaNet（线性注意力：`in_proj_qkv/z/b/a` + 因果 Conv1D + 门控 delta rule），第 4 层为 Gated Attention（标准 GQA + 输出门控）。
 * `q_heads=8`、`kv_heads=4`，`max_position_embeddings=32768`，`rope_theta=1e7`。
+* 推理缓存为混合形式：全注意力层保存 KV cache，线性层只保存固定大小的 `conv_state / recurrent_state`，因此长上下文下显存增长远慢于纯 Transformer。
+* 训练时线性层走分块（chunk）算法，单步解码时走递归（recurrent）算法，二者数值等价（见 `tests/test_model.py`）；纯 PyTorch 实现，不依赖 `flash-linear-attention` 等外部 kernel。
 
 `minimind-3-moe` 在相同结构上扩展 MoE 前馈层，实现上兼容 `Qwen3.5-MoE`（含 shared expert + `shared_expert_gate`）。
 
@@ -592,6 +607,8 @@ MiniMind训练数据集下载地址： [ModelScope](https://www.modelscope.cn/da
 | minimind2-moe | 145M | 6400 | 32768 | 1e6 | 8 | 640 | 2 | 8 | 历史版本 |
 | minimind2 | 104M | 6400 | 32768 | 1e6 | 16 | 768 | 2 | 8 | 历史版本 |
 
+> 表中 `minimind-3` 两行为当前代码默认配置的实测参数量；下文训练开销、评测等表格中的 `64M / 198M-A64M` 均指 `2026-04-01` 发布的旧结构权重，新结构权重重训完成后统一更新。
+> 结构图 `LLM-structure*.jpg` 仍为旧结构示意，待重绘。
 
 ## 模型配置
 
@@ -628,7 +645,7 @@ MobileLLM 的一个核心观察是：在参数量固定时，深度往往比宽�
 - **时间单位**：小时（h）
 - **成本单位**：人民币（￥）；`7￥ ≈ 1 美元`
 - **3090 租卡单价**：约 `1.3￥/h`（实际价格可自行参考）
-- **说明**：以下结果为 `minimind` 模型在单卡 `3090` 上的经验估算值，用于快速感知训练门槛
+- **说明**：以下结果为 `minimind` 模型在单卡 `3090` 上的经验估算值，用于快速感知训练门槛；基于旧结构（`64M / 198M-A64M`）实测，新结构因线性层为纯 PyTorch 实现，GPU 吞吐待重测
 
 | Model Name | params | pretrain_t2t_mini | sft_t2t_mini | toolcall | RLAIF |
 |------------|--------|-------------------|--------------|----------|-------|
@@ -773,6 +790,7 @@ python train_distillation.py
 
 LoRA 是一种常见的参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）方法。相比全参数微调，它只更新少量新增参数，而保留原始模型主体权重不变，因此训练成本更低，也更适合做垂直场景适配。
 它的核心思想是在原有权重矩阵旁引入低秩增量分支，仅训练这部分低秩参数，从而用较小代价完成能力迁移。相关实现可见 `model_lora.py` 和 `train_lora.py`，整个流程均为纯手写实现，不依赖第三方封装。
+默认按模块名挂载到注意力投影层：全注意力层的 `q_proj / k_proj / v_proj / o_proj`，线性注意力层的 `in_proj_qkv / out_proj`；可通过 `apply_lora(model, target_modules=...)` 自定义。
 
 ```bash
 # train_lora.py 在 CPU 上通常也能比较轻快地完成
@@ -1015,7 +1033,7 @@ RLAIF的训练过程中，模型会基于user的问题生成1或多个候选回�
 
 **2️⃣ 奖励机制准备 (必须)**
 
-RLAIF训练需要某种可计算的奖励信号；它可以来自奖励模型，也可以来自规则函数、Ground Truth 校验或环境反馈。MiniMind 当前默认演示的是 Reward Model 路线。
+RLAIF训练需要某种可计算的奖励信号；它可以来自奖励模型，也可以来自规则函数、Ground Truth 校验或环境反馈。MiniMind 当前默认演示的是 Reward Model 路线；若暂时不想下载奖励模型，`train_ppo.py / train_grpo.py / train_agent.py` 均支持 `--reward_model_path none`，此时只使用内置的规则奖励（长度、`<think>` 格式、重复惩罚，Agent 脚本另含答案校验）。
 
 此处选取小型且高质量的 `InternLM2-1.8B-Reward` ([ModelScope](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-1_8b-reward) | [HuggingFace](https://huggingface.co/internlm/internlm2-1_8b-reward)) 作为基础奖励模型。
 
@@ -1296,6 +1314,8 @@ python eval_toolcall.py --weight agent
 #### ① PyTorch模型 ([ModelScope](https://www.modelscope.cn/models/gongjy/minimind-3-pytorch) | [HuggingFace](https://huggingface.co/jingyaogong/minimind-3-pytorch))
 
 > 注：模型权重以实际 release 为准。并非所有训练阶段或实验分支（如 DPO、PPO、GRPO、CISPO、Agent、LoRA 等）的权重都会持续维护并单独公开；部分权重仅用于实验验证或学习用途，随着数据迭代或模型调整，逐一同步更新所有版本的必要性有限，且会带来较高的维护与训练成本。
+>
+> 当前已发布的 `*.pth` 为 `Qwen3` 旧结构，与迁移到 `Qwen3.5` 后的 `model_minimind.py` 不兼容（`load_state_dict` 会缺失 `linear_attn.*`、`shared_expert.*` 等键）；`transformers` 格式权重不受影响。
 
 
 <details>
